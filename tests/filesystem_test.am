@@ -1,0 +1,73 @@
+namespace Tests
+
+import Amalgame.IO.Filesystem
+import Amalgame.Collections
+import Amalgame.String
+
+public class Program {
+    static int Ok(name: string, cond: bool) {
+        if (cond) {
+            Console.WriteLine("[PASS] " + name)
+            return 1
+        }
+        Console.WriteLine("[FAIL] " + name)
+        return 0
+    }
+
+    static bool Has(xs: List<string>, v: string) {
+        var i: int = 0
+        while (i < xs.Count()) {
+            let e: string = xs.Get(i)
+            if (e == v) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    public static void Main(string[] args) {
+        var nPass: int = 0
+        var nTot: int = 0
+        let root: string = "_fstest"
+
+        // build a small tree: _fstest/{a.txt, b.md, sub/{c.md}}
+        File.Mkdir(root)
+        File.Mkdir(root + "/sub")
+        File.WriteAll(root + "/a.txt", "hello")
+        File.WriteAll(root + "/b.md", "# md")
+        File.WriteAll(root + "/sub/c.md", "# nested")
+
+        // List: 3 direct entries
+        let entries: List<string> = Filesystem.List(root)
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("List count == 3", entries.Count() == 3)
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("List has a.txt", Program.Has(entries, "a.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("List has b.md", Program.Has(entries, "b.md"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("List has sub", Program.Has(entries, "sub"))
+
+        // IsDir / IsFile
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("sub is dir", Filesystem.IsDir(root + "/sub"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("a.txt is not dir", !Filesystem.IsDir(root + "/a.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("a.txt is file", Filesystem.IsFile(root + "/a.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("sub is not file", !Filesystem.IsFile(root + "/sub"))
+        let nopeList: List<string> = Filesystem.List(root + "/nope")
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("missing dir lists empty", nopeList.Count() == 0)
+
+        // ListRecursive: 3 files, nested path joined, no bare "sub"
+        let all: List<string> = Filesystem.ListRecursive(root)
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive count == 3", all.Count() == 3)
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive has a.txt", Program.Has(all, "a.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive has sub/c.md", Program.Has(all, "sub/c.md"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive omits bare sub", !Program.Has(all, "sub"))
+
+        // cleanup
+        File.Delete(root + "/sub/c.md")
+        File.Delete(root + "/a.txt")
+        File.Delete(root + "/b.md")
+
+        let nFail: int = nTot - nPass
+        Console.WriteLine("")
+        Console.WriteLine("Summary: " + String_FromInt(nPass) + " passed, " + String_FromInt(nFail) + " failed")
+        if (nFail > 0) {
+            Console.WriteLine("FAILED")
+        }
+    }
+}

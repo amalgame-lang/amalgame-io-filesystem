@@ -1,0 +1,143 @@
+// amalgame-io-filesystem — directory listing for Amalgame (v0.1.0).
+//
+// The bundled `File` facade can read/write/delete a file and test
+// existence, but it cannot *enumerate* a directory. This package adds
+// that missing slice:
+//
+//   import Amalgame.IO.Filesystem
+//
+//   for name in Filesystem.List("./src") { ... }      // entry names
+//   if (Filesystem.IsDir(path)) { ... }
+//   let mds = Filesystem.ListRecursive("docs/guide")  // all files, DFS
+//
+// The readdir/stat syscalls sit behind a thin @c frontier (POSIX
+// opendir/readdir + Windows FindFirstFile); the recursion, filtering
+// and path joining are pure Amalgame.
+
+namespace Amalgame.IO.Filesystem
+
+import Amalgame.Collections
+import Amalgame.String
+
+@c {
+    #include <string.h>
+    #include <stdlib.h>
+    #include <sys/stat.h>
+    #ifdef _WIN32
+        #include <windows.h>
+    #else
+        #include <dirent.h>
+    #endif
+
+    /* Append every entry name in `path` (excluding "." / "..") to the
+     * out-list. No-op if the directory can't be opened. Names are
+     * GC-allocated copies so they outlive the readdir buffer. */
+    static void amalgame_fs_list(const char* path, AmalgameList* out) {
+        if (!path) return;
+    #ifdef _WIN32
+        char pattern[MAX_PATH];
+        int dlen = (int) strlen(path);
+        if (dlen + 3 >= (int) sizeof(pattern)) return;
+        memcpy(pattern, path, dlen);
+        if (dlen > 0 && path[dlen - 1] != '\\' && path[dlen - 1] != '/') {
+            pattern[dlen++] = '\\';
+        }
+        pattern[dlen++] = '*';
+        pattern[dlen]   = '\0';
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (strcmp(fd.cFileName, ".") == 0)  continue;
+            if (strcmp(fd.cFileName, "..") == 0) continue;
+            size_t nlen = strlen(fd.cFileName);
+            char* copy = (char*) GC_MALLOC(nlen + 1);
+            memcpy(copy, fd.cFileName, nlen + 1);
+            AmalgameList_add(out, (void*) copy);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    #else
+        DIR* dh = opendir(path);
+        if (!dh) return;
+        struct dirent* e;
+        while ((e = readdir(dh)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0)  continue;
+            if (strcmp(e->d_name, "..") == 0) continue;
+            size_t nlen = strlen(e->d_name);
+            char* copy = (char*) GC_MALLOC(nlen + 1);
+            memcpy(copy, e->d_name, nlen + 1);
+            AmalgameList_add(out, (void*) copy);
+        }
+        closedir(dh);
+    #endif
+    }
+
+    /* 1 if `path` is a directory, else 0. */
+    static int amalgame_fs_is_dir(const char* path) {
+        if (!path) return 0;
+    #ifdef _WIN32
+        DWORD a = GetFileAttributesA(path);
+        if (a == INVALID_FILE_ATTRIBUTES) return 0;
+        return (a & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    #else
+        struct stat st;
+        if (stat(path, &st) != 0) return 0;
+        return S_ISDIR(st.st_mode) ? 1 : 0;
+    #endif
+    }
+}
+
+public class Filesystem {
+    public Filesystem() {}
+
+    // Entry names (files + subdirectories) directly inside `dir`,
+    // excluding "." and "..". Empty if `dir` can't be opened. Order is
+    // filesystem-defined (not sorted) — sort the result if you need a
+    // stable order.
+    public static List<string> List(dir: string) {
+        let out: List<string> = new List<string>()
+        @c { amalgame_fs_list(dir, out); }
+        return out
+    }
+
+    // True if `path` is a directory.
+    public static bool IsDir(path: string) {
+        var r: int = 0
+        @c { r = (i64) amalgame_fs_is_dir(path); }
+        return r != 0
+    }
+
+    // True if `path` exists and is a regular file (not a directory).
+    public static bool IsFile(path: string) {
+        if (!File.Exists(path)) { return false }
+        return !Filesystem.IsDir(path)
+    }
+
+    // Every file under `root` (recursive, depth-first), as paths
+    // relative to `root` and joined with "/". Directories are
+    // descended into but not themselves emitted.
+    public static List<string> ListRecursive(root: string) {
+        var out: List<string> = new List<string>()
+        Filesystem.WalkInto(root, "", out)
+        return out
+    }
+
+    // Recursive worker: `dir` is the full path to walk, `prefix` is the
+    // path of `dir` relative to the original root ("" at the top).
+    static void WalkInto(dir: string, prefix: string, out: List<string>) {
+        let entries: List<string> = Filesystem.List(dir)
+        var i: int = 0
+        while (i < entries.Count()) {
+            let name: string = entries.Get(i)
+            let full: string = dir + "/" + name
+            var rel: string = name
+            if (prefix.Length() > 0) { rel = prefix + "/" + name }
+            if (Filesystem.IsDir(full)) {
+                Filesystem.WalkInto(full, rel, out)
+            } else {
+                out.Add(rel)
+            }
+            i = i + 1
+        }
+    }
+}

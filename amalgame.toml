@@ -1,0 +1,14 @@
+[package]
+name              = "amalgame-io-filesystem"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "Directory listing for Amalgame: the readdir/stat slice the bundled File facade is missing. Filesystem.List(dir) → entry names, Filesystem.IsDir / IsFile, and Filesystem.ListRecursive(root) → all file paths under a tree (DFS). POSIX opendir/readdir + Windows FindFirstFile behind a thin @c frontier; the recursion and path handling are pure Amalgame."
+required-amalgame = ">=0.8.58"
+schema-version    = 1
+
+[stdlib]
+class     = "Filesystem"
+header    = "facade-stub.h"
+namespace = "Amalgame.IO.Filesystem"
+facade    = "facade.am"
+libs      = []

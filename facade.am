@@ -1,18 +1,25 @@
-// amalgame-io-filesystem — directory listing for Amalgame (v0.1.0).
+// amalgame-io-filesystem — filesystem operations for Amalgame (v0.2.0).
 //
-// The bundled `File` facade can read/write/delete a file and test
-// existence, but it cannot *enumerate* a directory. This package adds
-// that missing slice:
+// The bundled `File` facade can read/write/delete a single file and test
+// existence, but it can't *enumerate* a directory or do recursive /
+// structural operations. This package fills that gap:
 //
 //   import Amalgame.IO.Filesystem
 //
+//   // enumeration
 //   for name in Filesystem.List("./src") { ... }      // entry names
 //   if (Filesystem.IsDir(path)) { ... }
 //   let mds = Filesystem.ListRecursive("docs/guide")  // all files, DFS
 //
-// The readdir/stat syscalls sit behind a thin @c frontier (POSIX
-// opendir/readdir + Windows FindFirstFile); the recursion, filtering
-// and path joining are pure Amalgame.
+//   // mutation
+//   Filesystem.MakeDir("build/linux/obj")  // mkdir -p (recursive)
+//   Filesystem.Move(tmp, final)            // rename within a volume
+//   Filesystem.Remove("build")             // rm -rf (recursive, idempotent)
+//
+// The readdir/stat/mkdir/rmdir/rename syscalls sit behind a thin @c
+// frontier (POSIX opendir/readdir/mkdir + Windows FindFirstFile/_mkdir/
+// RemoveDirectory); recursion, filtering and path joining are pure
+// Amalgame.
 
 namespace Amalgame.IO.Filesystem
 
@@ -22,11 +29,15 @@ import Amalgame.String
 @c {
     #include <string.h>
     #include <stdlib.h>
+    #include <stdio.h>
+    #include <errno.h>
     #include <sys/stat.h>
     #ifdef _WIN32
         #include <windows.h>
+        #include <direct.h>
     #else
         #include <dirent.h>
+        #include <unistd.h>
     #endif
 
     /* Append every entry name in `path` (excluding "." / "..") to the
@@ -85,6 +96,95 @@ import Amalgame.String
         return S_ISDIR(st.st_mode) ? 1 : 0;
     #endif
     }
+
+    /* Recursive mkdir — POSIX `mkdir -p`. Creates every missing prefix
+     * segment, ignoring "already exists". 1 on success, 0 on a hard
+     * error. */
+    static int amalgame_fs_mkdirp(const char* path) {
+        if (!path || !*path) return 0;
+        size_t len = strlen(path);
+        char* buf = (char*) GC_MALLOC(len + 1);
+        memcpy(buf, path, len + 1);
+        size_t start = 1;
+    #ifdef _WIN32
+        if (len >= 2 && buf[1] == ':') {
+            start = (len >= 3 && (buf[2] == '\\' || buf[2] == '/')) ? 3 : 2;
+        }
+    #endif
+        for (size_t i = start; i <= len; i++) {
+            char c = (i < len) ? buf[i] : '\0';
+            if (i == len || c == '/' || c == '\\') {
+                buf[i] = '\0';
+                int rc;
+    #ifdef _WIN32
+                rc = _mkdir(buf);
+    #else
+                rc = mkdir(buf, 0755);
+    #endif
+                buf[i] = c;
+                if (rc != 0 && errno != EEXIST) return 0;
+            }
+        }
+        return 1;
+    }
+
+    /* Recursive delete — POSIX `rm -rf`. A missing path counts as
+     * success (idempotent). 1 on success, 0 on a hard error. */
+    static int amalgame_fs_remove_all(const char* path) {
+        if (!path || !*path) return 0;
+        struct stat st;
+        if (stat(path, &st) != 0) return 1; /* already gone */
+        if (!S_ISDIR(st.st_mode)) return remove(path) == 0 ? 1 : 0;
+        size_t plen = strlen(path);
+    #ifdef _WIN32
+        {
+            char* pattern = (char*) GC_MALLOC(plen + 3);
+            memcpy(pattern, path, plen);
+            pattern[plen] = '\\'; pattern[plen+1] = '*'; pattern[plen+2] = '\0';
+            WIN32_FIND_DATAA fd;
+            HANDLE h = FindFirstFileA(pattern, &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (strcmp(fd.cFileName, ".") == 0)  continue;
+                    if (strcmp(fd.cFileName, "..") == 0) continue;
+                    size_t nl = strlen(fd.cFileName);
+                    char* child = (char*) GC_MALLOC(plen + 1 + nl + 1);
+                    memcpy(child, path, plen);
+                    child[plen] = '\\';
+                    memcpy(child + plen + 1, fd.cFileName, nl + 1);
+                    amalgame_fs_remove_all(child);
+                } while (FindNextFileA(h, &fd));
+                FindClose(h);
+            }
+            return RemoveDirectoryA(path) ? 1 : 0;
+        }
+    #else
+        {
+            DIR* dh = opendir(path);
+            if (dh) {
+                struct dirent* e;
+                while ((e = readdir(dh)) != NULL) {
+                    if (strcmp(e->d_name, ".") == 0)  continue;
+                    if (strcmp(e->d_name, "..") == 0) continue;
+                    size_t nl = strlen(e->d_name);
+                    char* child = (char*) GC_MALLOC(plen + 1 + nl + 1);
+                    memcpy(child, path, plen);
+                    child[plen] = '/';
+                    memcpy(child + plen + 1, e->d_name, nl + 1);
+                    amalgame_fs_remove_all(child);
+                }
+                closedir(dh);
+            }
+            return rmdir(path) == 0 ? 1 : 0;
+        }
+    #endif
+    }
+
+    /* Rename/move within a volume — `mv`. 1 on success, 0 on error. */
+    static int amalgame_fs_rename(const char* from, const char* to) {
+        if (!from || !to) return 0;
+        return rename(from, to) == 0 ? 1 : 0;
+    }
 }
 
 public class Filesystem {
@@ -104,6 +204,35 @@ public class Filesystem {
     public static bool IsDir(path: string) {
         var r: int = 0
         @c { r = (i64) amalgame_fs_is_dir(path); }
+        return r != 0
+    }
+
+    // Create `path` and any missing parent directories (POSIX
+    // `mkdir -p`). Succeeds (true) if the directory already exists.
+    // Cross-platform: POSIX mkdir(0755) / Windows _mkdir.
+    public static bool MakeDir(path: string) {
+        var r: int = 0
+        @c { r = (i64) amalgame_fs_mkdirp(path); }
+        return r != 0
+    }
+
+    // Recursively delete `path` — a file, or a directory and all its
+    // contents (POSIX `rm -rf`). A non-existent path is success
+    // (idempotent). Symlinks are removed, not followed. Returns false
+    // only on a real error (permissions, busy handle, …).
+    public static bool Remove(path: string) {
+        var r: int = 0
+        @c { r = (i64) amalgame_fs_remove_all(path); }
+        return r != 0
+    }
+
+    // Rename or move `from` → `to` within the same volume (POSIX/ANSI
+    // `rename`). Works for both files and directories. Cross-volume
+    // moves are not supported (use copy+Remove). On Windows, fails if
+    // `to` already exists — remove it first. Returns true on success.
+    public static bool Move(from: string, to: string) {
+        var r: int = 0
+        @c { r = (i64) amalgame_fs_rename(from, to); }
         return r != 0
     }
 

@@ -58,10 +58,22 @@ public class Program {
         nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive has sub/c.md", Program.Has(all, "sub/c.md"))
         nTot = nTot + 1 ; nPass = nPass + Program.Ok("recursive omits bare sub", !Program.Has(all, "sub"))
 
-        // cleanup
-        File.Delete(root + "/sub/c.md")
-        File.Delete(root + "/a.txt")
-        File.Delete(root + "/b.md")
+        // MakeDir: recursive (mkdir -p) creates missing parents
+        let deep: string = root + "/x/y/z"
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("MakeDir deep returns true", Filesystem.MakeDir(deep))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("MakeDir created nested dir", Filesystem.IsDir(deep))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("MakeDir idempotent", Filesystem.MakeDir(deep))
+
+        // Move: rename a file; old path gone, new path present
+        File.WriteAll(root + "/src.txt", "move me")
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Move returns true", Filesystem.Move(root + "/src.txt", root + "/dst.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Move removed source", !Filesystem.IsFile(root + "/src.txt"))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Move created target", Filesystem.IsFile(root + "/dst.txt"))
+
+        // Remove: recursive delete of the whole tree, then idempotent
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Remove tree returns true", Filesystem.Remove(root))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Remove deleted root", !Filesystem.IsDir(root))
+        nTot = nTot + 1 ; nPass = nPass + Program.Ok("Remove idempotent on missing", Filesystem.Remove(root))
 
         let nFail: int = nTot - nPass
         Console.WriteLine("")
